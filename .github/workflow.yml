@@ -1,57 +1,65 @@
-name: Frontend CI/CD with Railway
+name: Deploy Frontend to Amazon ECS
 
 on:
   push:
     branches: [ "main" ]
-    paths:
-      - 'ESIEA-5A-QualiteLogicielle-Car-Management-Front/**'
-  pull_request:
-    branches: [ "main" ]
-    paths:
-      - 'ESIEA-5A-QualiteLogicielle-Car-Management-Front/**'
+
+env:
+  AWS_REGION: eu-west-3
+  ECR_REPOSITORY: stockcar-frontend
+  ECS_SERVICE: stockcar-frontend-service
+  ECS_CLUSTER: stockcar-cluster
+  ECS_TASK_DEFINITION: .aws/task-definition-frontend.json
+  CONTAINER_NAME: stockcar-frontend
+
+permissions:
+  contents: read
 
 jobs:
-  validate:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      # Vérification basique des fichiers HTML
-      - name: HTML5 Validator
-        uses: Cyb3r-Jak3/html5validator-action@master
-        with:
-          root: ./ESIEA-5A-QualiteLogicielle-Car-Management-Front/src/main/webapp/
-          
-      # Optionnel : Ajout d'un linter JavaScript si vous voulez
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          
-      - name: Install ESLint
-        run: |
-          cd ESIEA-5A-QualiteLogicielle-Car-Management-Front
-          npm init -y
-          npm install eslint --save-dev
-          npx eslint --init
-          
-      - name: Run ESLint
-        run: |
-          cd ESIEA-5A-QualiteLogicielle-Car-Management-Front
-          npx eslint src/main/webapp/**/*.js
-
   deploy:
+    name: Deploy
     runs-on: ubuntu-latest
-    needs: validate
-    if: github.ref == 'refs/heads/main'
+    environment: production
+
     steps:
-      - uses: actions/checkout@v4
-      
-      - name: Install Railway CLI
-        run: npm install -g @railway/cli
-        
-      - name: Deploy to Railway
-        working-directory: ./ESIEA-5A-QualiteLogicielle-Car-Management-Front
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-        run: railway up
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+
+    - name: Build, tag, and push image to Amazon ECR
+      id: build-image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        IMAGE_TAG: ${{ github.sha }}
+      run: |
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+        docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+        echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+    - name: Fill in the new image ID in the Amazon ECS task definition
+      id: task-def
+      uses: aws-actions/amazon-ecs-render-task-definition@v1
+      with:
+        task-definition: ${{ env.ECS_TASK_DEFINITION }}
+        container-name: ${{ env.CONTAINER_NAME }}
+        image: ${{ steps.build-image.outputs.image }}
+
+    - name: Deploy Amazon ECS task definition
+      uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+      with:
+        task-definition: ${{ steps.task-def.outputs.task-definition }}
+        service: ${{ env.ECS_SERVICE }}
+        cluster: ${{ env.ECS_CLUSTER }}
+        wait-for-service-stability: true
